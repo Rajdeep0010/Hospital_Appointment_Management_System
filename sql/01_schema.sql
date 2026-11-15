@@ -1,4 +1,5 @@
 -- Create the database
+drop database if exists hospital_db;
 create database if not exists hospital_db;
 use hospital_db;
 
@@ -44,9 +45,9 @@ create table appointments(
      requested_start datetime,
      appt_start datetime not null,
      appt_end datetime,
-     appt_type enum('normal','follow-up','emergency') not null,
-     appt_status enum('booked','confirmed','complete','cancelled','no_show','wait_listed') not null default 'booked',
-     on_full enum('reject','next_slot','waitlisted') not null default 'reject',
+     appt_type   enum('NORMAL','FOLLOW_UP','EMERGENCY') not null,
+     appt_status enum('BOOKED','CONFIRMED','COMPLETED','CANCELLED','NO_SHOW','WAITLISTED') not null default 'BOOKED',
+     on_full     enum('REJECT','NEXT_SLOT','WAITLIST') not null default 'REJECT',
      confirm_by datetime,
      reason varchar(200),
      cancel_reason varchar(100),
@@ -76,3 +77,9 @@ create index idx_appt_doctor_start on appointments(doctor_id,appt_start);
 create index idx_appt_patient_start on appointments(patient_id, appt_start);
 
 SHOW INDEX FROM bills;
+
+select * from departments;
+select * from doctors;
+select * from patients;
+select * from appointments;
+SELECT COUNT(*) FROM appointments;
