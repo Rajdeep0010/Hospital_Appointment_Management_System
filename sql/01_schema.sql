@@ -2,20 +2,19 @@
 create database if not exists hospital_db;
 use hospital_db;
 
--- Create the schemas
--- 1. Departments
+-- 1. departments
 create table departments(
     dept_id INT auto_increment primary key,
     dept_name varchar(20) NOT NULL unique,
     floor_no int
 );
 
--- 2.doctors
+-- 2. doctors
 create table doctors(
      doctor_id INT auto_increment primary key,
      dept_id int not null,
      full_name varchar(50) not null,
-     email varchar(100) not null,
+     email varchar(100) not null unique,
      consulatation_fee decimal(10,2),
      shift_start time not null,
      shift_end time not null,
@@ -25,18 +24,20 @@ create table doctors(
      is_active tinyint not null default 1,
      check(shift_end>shift_start),
      foreign key (dept_id) references departments(dept_id)
-); 
--- 3.patients
+);
+
+-- 3. patients
 create table patients(
-	 patient_id int auto_increment primary key,
+     patient_id int auto_increment primary key,
      full_name varchar(80) not null,
-     phone varchar(15) not null unique ,
+     phone varchar(15) not null unique,
      dob date,
      gender ENUM('M','F','Others'),
      blood_group varchar(10),
      created_at timestamp default current_timestamp
-   );
--- 4.appointments
+);
+
+-- 4. appointments
 create table appointments(
      appoinment_id int auto_increment primary key,
      patient_id int not null,
@@ -44,25 +45,26 @@ create table appointments(
      requested_start datetime,
      appt_start datetime not null,
      appt_end datetime,
-     appt_type enum('normal','follow-up','emergency') not null,
-     appt_status enum('booked','confirmed','complete','cancelled','no_show','wait_listed') not null default 'booked',
-     on_full enum('reject','next_slot','waitlisted') not null default 'reject',
+     appt_type enum('NORMAL','FOLLOW_UP','EMERGENCY') not null,
+     appt_status enum('BOOKED','CONFIRMED','COMPLETED','CANCELLED','NO_SHOW','WAITLISTED') not null default 'BOOKED',
+     on_full enum('REJECT','NEXT_SLOT','WAITLIST') not null default 'REJECT',
      confirm_by datetime,
      reason varchar(200),
      cancel_reason varchar(100),
      created_at timestamp default current_timestamp,
      cancelled_at datetime,
      foreign key(patient_id) references patients(patient_id),
-     foreign key(doctor_id) references doctors(doctor_id)     
+     foreign key(doctor_id) references doctors(doctor_id)
 );
--- 5.bills
+
+-- 5. bills
 create table bills(
       bill_id int auto_increment primary key,
       appointment_id int not null unique,
       base_fee decimal(10,2) not null default 0.00,
       adjustment decimal(10,2) not null default 0.00,
-	  net_ammount decimal(10,2) not null default 0.00,
-      payment_status enum('pending','paid','part_refunded','refunded','void') not null default 'pending',
+      net_ammount decimal(10,2) not null default 0.00,
+      payment_status enum('PENDING','PAID','PART_REFUNDED','REFUNDED','VOID') not null default 'PENDING',
       payment_mode varchar(20),
       refund_ammount decimal(10,2) not null default 0.00,
       billed_at timestamp default current_timestamp,
@@ -71,8 +73,7 @@ create table bills(
 
 show tables;
 
--- Indexes for the booking check 
-create index idx_appt_doctor_start on appointments(doctor_id,appt_start);
+-- Indexes
+create index idx_appt_doctor_start on appointments(doctor_id, appt_start);
 create index idx_appt_patient_start on appointments(patient_id, appt_start);
-
-SHOW INDEX FROM bills;
+create index idx_bills_status on bills(payment_status);
