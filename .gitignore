@@ -1,0 +1,36 @@
+# ---------- Secrets and local settings (never commit) ----------
+.env
+*.env
+config.local.*
+my.cnf
+.my.cnf
+*.pem
+*.key
+credentials*
+connection_*.txt
+
+# ---------- Operating system junk ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Editor and IDE files ----------
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---------- MySQL Workbench personal files ----------
+*.mwb.bak
+*.mwb~
+*.bak
+workbench_user_data.dat
+sql_history/
+
+# ---------- Local scratch work ----------
+scratch/
+tmp/
+*.tmp
+*.log
+*.local.sql
+tests/b_testbed_local.sql
