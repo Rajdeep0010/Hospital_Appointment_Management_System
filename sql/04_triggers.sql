@@ -1,4 +1,8 @@
 use hospital_db;
+drop trigger if exists trg_appt_before_insert;
+drop trigger if exists trg_appt_before_update;
+drop trigger if exists trg_appt_after_update;
+drop trigger if exists trg_bill_before_insert;
 
 -- Trigger 1: Before insert on appointments (Booking rules)
 delimiter $$
@@ -12,11 +16,13 @@ begin
     declare v_end    time;
     declare v_slot   int;
     declare v_count int;
+    declare v_max int;
 
-    -- Rule 1: read the doctor's working rules
-    select is_active, weekly_off, shift_start, shift_end, slot_min
-    into v_active, v_off, v_start, v_end, v_slot
-    from doctors where doctor_id = new.doctor_id;
+    -- Rule 1: read the doctor's working rules and lock the doctor row (FOR UPDATE)
+    select is_active, weekly_off, shift_start, shift_end, slot_min, max_daily_appointments
+    into v_active, v_off, v_start, v_end, v_slot, v_max
+    from doctors where doctor_id = new.doctor_id for update;
+
 
     -- Rule 2: the doctor must exist and be active
     if v_active is null or v_active = 0 then
@@ -44,6 +50,21 @@ begin
     -- Rule 7: the minute must fit the slot size (emergency is allowed)
     if minute(new.appt_start) % v_slot <> 0 and new.appt_type <> 'EMERGENCY' then
         signal sqlstate '45000' set message_text = 'Time is not on the slot grid';
+    end if;
+    
+	-- rule 7b: a follow-up needs a completed visit with the same doctor in the last 14 days
+    if new.appt_type = 'FOLLOW_UP' then
+        select count(*) into v_count
+        from appointments
+        where patient_id = new.patient_id
+          and doctor_id = new.doctor_id
+          and appt_status = 'COMPLETED'
+          and appt_start < new.appt_start
+          and appt_start >= new.appt_start - interval 14 day;
+
+        if v_count = 0 then
+            signal sqlstate '45000' set message_text = 'No earlier visit for follow-up';
+        end if;
     end if;
     
 	-- rule 8: the doctor must not be busy at this time (time overlap)
@@ -181,8 +202,11 @@ end$$
 
 delimiter ;
 
+
 show triggers;
 
+SELECT COUNT(*) AS total_appointments FROM appointments;
+SHOW TRIGGERS;
 
 
     
