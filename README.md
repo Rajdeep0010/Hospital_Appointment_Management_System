@@ -82,7 +82,7 @@ Rule triggers:
 
 ## Procedures and transactions
 
-TODO: list the procedures and the COMMIT / ROLLBACK / SAVEPOINT demos from
+ list the procedures and the COMMIT / ROLLBACK / SAVEPOINT demos from
 `project.sql` and `sql/demo.sql`.
 
 ## Repository layout
@@ -112,10 +112,8 @@ CONTRACT.md              agreed column names, messages and policy values
    mysql -u root -p < sql/project.sql
    ```
    or, inside the MySQL shell: `source sql/project.sql;`
-3. Run `sql/demo.sql` to see the rules in action. TODO: say what it shows.
+3. Run `sql/demo.sql` to see the rules in action. 
 
-Do not run `sql/test1.sql` on real data: it ends with DELETE statements that
-empty every table.
 
 ## Policy constants
 
@@ -134,5 +132,7 @@ format, not that it is true.
 ## Team
 
 - Ananya Manna (Person A): schema, cleaning layer, seed data, views, queries
-- Rajdeep (Person B): rule triggers, procedures, transactions. TODO: confirm
-  names and roles
+- Rajdeep (Person B): rule triggers, procedures, transactions.
+
+<img width="1137" height="798" alt="ER Diagram" src="https://github.com/user-attachments/assets/529ce2ea-b5ed-4e80-a996-2227290309ab" />
+
