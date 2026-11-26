@@ -1,14 +1,10 @@
 
 -- HOSPITAL Appointment MANAGEMENT SYSTEM
-
-
 DROP DATABASE IF EXISTS hospital_db;
 CREATE DATABASE hospital_db;
 USE hospital_db;
 
 -- PART 1: CREATE TABLES
-
-
 -- 1. DEPARTMENTS
 
 CREATE TABLE departments (
@@ -97,6 +93,18 @@ CREATE TABLE bills (
         REFERENCES appointments(appoinment_id)
 );
 
+show tables;
+
+CREATE INDEX idx_appt_doctor_status_start
+    ON appointments (doctor_id, appt_status, appt_start); 
+
+CREATE INDEX idx_appt_patient_status_start
+    ON appointments (patient_id, appt_status, appt_start);
+
+CREATE INDEX idx_bills_payment_status
+    ON bills (payment_status);    
+    
+SHOW INDEX FROM appointments;    
 
 -- =====================================================
 -- PART 2: INSERT DEPARTMENTS
@@ -136,10 +144,13 @@ VALUES
 (5, 'Dr. Ananya Sen', 'ananya@hospital.com',
  400, '09:00:00', '17:00:00', 30, 25, 6);
 
+select * from departments;
+select * from doctors;
 
--- PART 4: APPOINTMENT VALIDATION TRIGGER
+DELIMITER $$
 
-DELIMITER //
+
+-- TRIGGER 1: check_appointment
 
 CREATE TRIGGER check_appointment
 BEFORE INSERT ON appointments
@@ -154,10 +165,8 @@ BEGIN
     DECLARE v_count INT;
     DECLARE v_end DATETIME;
 
-    -- Check whether doctor exists
-
-    SELECT COUNT(*)
-    INTO v_count
+    -- 1. Doctor must exist
+    SELECT COUNT(*) INTO v_count
     FROM doctors
     WHERE doctor_id = NEW.doctor_id;
 
@@ -166,64 +175,52 @@ BEGIN
         SET MESSAGE_TEXT = 'Doctor does not exist';
     END IF;
 
-    -- Get doctor details
-
-    SELECT is_active, slot_min,
-           max_daily_appointments, weekly_off,
-           shift_start, shift_end
+    -- Load the doctor's rules
+    SELECT is_active, slot_min, max_daily_appointments,
+           weekly_off, shift_start, shift_end
     INTO v_active, v_slot, v_max, v_off,
          v_shift_start, v_shift_end
     FROM doctors
     WHERE doctor_id = NEW.doctor_id;
 
+    -- 2. Doctor must be active
     IF v_active = FALSE THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Doctor is not active';
     END IF;
 
-    -- Check appointment date
-
+    -- 3. Not in the past
     IF NEW.appt_start < NOW() THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Appointment cannot be in the past';
     END IF;
 
-    -- Calculate appointment end time
-
-    SET v_end = DATE_ADD(
-        NEW.appt_start,
-        INTERVAL v_slot MINUTE
-    );
-
+    -- 4. Calculate the end time
+    SET v_end = DATE_ADD(NEW.appt_start, INTERVAL v_slot MINUTE);
     SET NEW.appt_end = v_end;
 
-    -- Check weekly off
-
+    -- 5. Weekly off
     IF WEEKDAY(NEW.appt_start) = v_off THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Doctor has a weekly off';
     END IF;
 
-    -- Check working hours
-
+    -- 6. Working hours
     IF TIME(NEW.appt_start) < v_shift_start
        OR TIME(v_end) > v_shift_end THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Outside doctor working hours';
     END IF;
 
-    -- Check appointment slot
-
+    -- 7. Slot boundary
     IF MINUTE(NEW.appt_start) MOD v_slot <> 0
        OR SECOND(NEW.appt_start) <> 0 THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Invalid appointment time slot';
     END IF;
 
-    -- Check doctor appointment overlap
-
-    SELECT COUNT(*)
-    INTO v_count
+    -- 8. Doctor overlap
+    SELECT COUNT(*) INTO v_count
     FROM appointments
     WHERE doctor_id = NEW.doctor_id
       AND appt_status IN ('BOOKED', 'CONFIRMED')
@@ -235,10 +232,8 @@ BEGIN
         SET MESSAGE_TEXT = 'Doctor already has an appointment';
     END IF;
 
-    -- Check patient appointment overlap
-
-    SELECT COUNT(*)
-    INTO v_count
+	-- 9. Patient overlap
+    SELECT COUNT(*) INTO v_count
     FROM appointments
     WHERE patient_id = NEW.patient_id
       AND appt_status IN ('BOOKED', 'CONFIRMED')
@@ -250,10 +245,8 @@ BEGIN
         SET MESSAGE_TEXT = 'Patient already has an appointment';
     END IF;
 
-    -- Check daily appointment limit
-
-    SELECT COUNT(*)
-    INTO v_count
+    -- 10. Daily limit
+    SELECT COUNT(*) INTO v_count
     FROM appointments
     WHERE doctor_id = NEW.doctor_id
       AND DATE(appt_start) = DATE(NEW.appt_start)
@@ -264,10 +257,39 @@ BEGIN
         SET MESSAGE_TEXT = 'Daily appointment limit reached';
     END IF;
 
-END //
+END$$
+    
 
--- PART 5: BILL CALCULATION TRIGGER
+-- trigger 2: trg_appt_before_update
+CREATE TRIGGER trg_appt_before_update
+BEFORE UPDATE ON appointments
+FOR EACH ROW
+BEGIN
+    -- Cannot move an appointment; cancel it and book again
+    IF NEW.appt_start <> OLD.appt_start
+       OR NEW.doctor_id <> OLD.doctor_id
+       OR NEW.patient_id <> OLD.patient_id THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Cannot change time, doctor or patient. Cancel and rebook';
+    END IF;
 
+    -- Allowed status changes:
+    --   BOOKED    -> CONFIRMED or CANCELLED
+    --   CONFIRMED -> COMPLETED or CANCELLED
+    IF NEW.appt_status <> OLD.appt_status THEN
+        IF NOT (
+            (OLD.appt_status = 'BOOKED'
+                AND NEW.appt_status IN ('CONFIRMED', 'CANCELLED'))
+         OR (OLD.appt_status = 'CONFIRMED'
+                AND NEW.appt_status IN ('COMPLETED', 'CANCELLED'))
+        ) THEN
+            SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Invalid appointment status change';
+        END IF;
+    END IF;
+END$$
+
+-- trigger 3: calculate_bill
 CREATE TRIGGER calculate_bill
 BEFORE INSERT ON bills
 FOR EACH ROW
@@ -276,15 +298,14 @@ BEGIN
     DECLARE v_type VARCHAR(20);
     DECLARE v_fee DECIMAL(10,2);
 
-    SELECT a.appt_status, a.appt_type,
-           d.consulatation_fee
+    SELECT a.appt_status, a.appt_type, d.consulatation_fee
     INTO v_status, v_type, v_fee
     FROM appointments a
-    JOIN doctors d
-        ON a.doctor_id = d.doctor_id
+    JOIN doctors d ON a.doctor_id = d.doctor_id
     WHERE a.appoinment_id = NEW.appointment_id;
 
-    IF v_status <> 'CONFIRMED' THEN
+    -- IS NULL covers an appointment id that does not exist
+    IF v_status IS NULL OR v_status <> 'CONFIRMED' THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Appointment must be confirmed first';
     END IF;
@@ -294,24 +315,52 @@ BEGIN
 
     IF v_type = 'FOLLOW_UP' THEN
         SET NEW.adjustment = -(v_fee * 0.50);
-
     ELSEIF v_type = 'EMERGENCY' THEN
         SET NEW.adjustment = v_fee * 0.25;
     END IF;
 
-    SET NEW.net_ammount =
-        NEW.base_fee + NEW.adjustment;
+    SET NEW.net_ammount = NEW.base_fee + NEW.adjustment;
+END$$
 
-END //
+-- TRIGGER 4: trg_appt_after_update
+CREATE TRIGGER trg_appt_after_update
+AFTER UPDATE ON appointments
+FOR EACH ROW
+BEGIN
+    IF OLD.appt_status <> NEW.appt_status THEN
+
+        -- a) create the bill on confirmation
+        IF OLD.appt_status = 'BOOKED'
+           AND NEW.appt_status = 'CONFIRMED' THEN
+
+            INSERT INTO bills
+                (appointment_id, base_fee, adjustment, net_ammount)
+            VALUES
+                (NEW.appoinment_id, 0, 0, 0);
+        END IF;
+
+        -- b) refund policy on cancellation
+        IF NEW.appt_status = 'CANCELLED' THEN
+
+            UPDATE bills
+            SET refund_ammount =
+                    CASE WHEN payment_status = 'PAID'
+                         THEN net_ammount * 0.50
+                         ELSE 0 END,
+                payment_status =
+                    CASE WHEN payment_status = 'PAID'
+                         THEN 'REFUNDED'
+                         ELSE 'VOID' END
+            WHERE appointment_id = NEW.appoinment_id;
+        END IF;
+    END IF;
+END$$
 
 DELIMITER ;
 
-
--- PART 6: BOOK APPOINTMENT PROCEDURE
-
-
-DELIMITER //
-
+-- procedures
+-- procedure 1
+DELIMITER $$
 CREATE PROCEDURE book_appointment(
     IN p_name VARCHAR(100),
     IN p_id_type VARCHAR(30),
@@ -326,7 +375,11 @@ CREATE PROCEDURE book_appointment(
 BEGIN
     DECLARE v_patient_id INT;
     DECLARE v_doctor_id INT;
+    DECLARE v_lock_id INT;
     DECLARE v_appointment_id INT;
+    DECLARE v_id_type VARCHAR(30);
+    DECLARE v_id_number VARCHAR(100);
+    DECLARE v_type VARCHAR(20);
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -334,40 +387,31 @@ BEGIN
         RESIGNAL;
     END;
 
-    START TRANSACTION;
+    -- Normalize inputs once, and use the SAME values for
+    -- both the search and the insert
+    SET v_id_type   = UPPER(TRIM(p_id_type));
+    SET v_id_number = UPPER(REPLACE(TRIM(p_id_number), ' ', ''));
+    SET v_type      = UPPER(TRIM(p_appt_type));
 
-    -- Find existing patient
-
-    SELECT MAX(patient_id)
-    INTO v_patient_id
-    FROM patients
-    WHERE govt_id_type = UPPER(TRIM(p_id_type))
-      AND govt_id_number =
-          UPPER(REPLACE(TRIM(p_id_number), ' ', ''));
-
-    -- Register new patient if not found
-
-    IF v_patient_id IS NULL THEN
-
-        INSERT INTO patients
-        (full_name, govt_id_type, govt_id_number,
-         phone, email)
-        VALUES
-        (p_name, p_id_type, p_id_number,
-         p_phone, p_email);
-
-        SET v_patient_id = LAST_INSERT_ID();
-
+    -- Input validation (no ENUM on the table, so check here)
+    IF v_type NOT IN ('REGULAR', 'FOLLOW_UP', 'EMERGENCY') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid appointment type';
     END IF;
 
-    -- Find doctor using department and email
+    IF p_appt_time IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Appointment time is required';
+    END IF;
 
+    START TRANSACTION;
+
+    -- Find the doctor (department name + email, active only)
     SELECT MAX(d.doctor_id)
     INTO v_doctor_id
     FROM doctors d
-    JOIN departments dep
-        ON d.dept_id = dep.dept_id
-    WHERE dep.dept_name = p_dept_name
+    JOIN departments dep ON d.dept_id = dep.dept_id
+    WHERE dep.dept_name = TRIM(p_dept_name)
       AND d.email = LOWER(TRIM(p_doctor_email))
       AND d.is_active = TRUE;
 
@@ -376,30 +420,51 @@ BEGIN
         SET MESSAGE_TEXT = 'Doctor not found';
     END IF;
 
-    -- Create appointment
+    -- Lock this doctor's row until COMMIT/ROLLBACK.
+    -- Two people booking the same doctor now queue up, so the
+    -- trigger's overlap and daily-limit checks cannot race.
+    SELECT doctor_id
+    INTO v_lock_id
+    FROM doctors
+    WHERE doctor_id = v_doctor_id
+    FOR UPDATE;
 
+    -- Find the existing patient
+    SELECT MAX(patient_id)
+    INTO v_patient_id
+    FROM patients
+    WHERE govt_id_type = v_id_type
+      AND govt_id_number = v_id_number;
+
+    -- Register a new patient if not found
+    IF v_patient_id IS NULL THEN
+        INSERT INTO patients
+            (full_name, govt_id_type, govt_id_number, phone, email)
+        VALUES
+            (p_name, v_id_type, v_id_number, p_phone, p_email);
+
+        SET v_patient_id = LAST_INSERT_ID();
+    END IF;
+
+    -- Create the appointment (trigger check_appointment fires here)
     INSERT INTO appointments
-    (patient_id, doctor_id, requested_start,
-     appt_start, appt_type, reason)
+        (patient_id, doctor_id, requested_start,
+         appt_start, appt_type, reason)
     VALUES
-    (v_patient_id, v_doctor_id, p_appt_time,
-     p_appt_time, p_appt_type, 'Hospital appointment');
+        (v_patient_id, v_doctor_id, p_appt_time,
+         p_appt_time, v_type, 'Hospital appointment');
 
     SET v_appointment_id = LAST_INSERT_ID();
 
     COMMIT;
 
     SELECT
-        v_patient_id AS patient_id,
+        v_patient_id     AS patient_id,
         v_appointment_id AS appointment_id,
         'Appointment booked successfully' AS message;
+END$$
 
-END //
-
-
--- PART 7: CONFIRM APPOINTMENT PROCEDURE
-
-
+-- procedure 2
 CREATE PROCEDURE confirm_appointment(
     IN p_appointment_id INT
 )
@@ -417,7 +482,13 @@ BEGIN
     SELECT appt_status
     INTO v_status
     FROM appointments
-    WHERE appoinment_id = p_appointment_id;
+    WHERE appoinment_id = p_appointment_id
+    FOR UPDATE;
+
+    IF v_status IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Appointment not found';
+    END IF;
 
     IF v_status <> 'BOOKED' THEN
         SIGNAL SQLSTATE '45000'
@@ -428,19 +499,14 @@ BEGIN
     SET appt_status = 'CONFIRMED'
     WHERE appoinment_id = p_appointment_id;
 
-    INSERT INTO bills
-    (appointment_id, base_fee, adjustment, net_ammount)
-    VALUES
-    (p_appointment_id, 0, 0, 0);
-
     COMMIT;
 
-END //
+    SELECT
+        p_appointment_id AS appointment_id,
+        'Appointment confirmed and bill created' AS message;
+END$$
 
-
-
--- PART 8: CANCEL APPOINTMENT PROCEDURE
-
+-- procedure 3
 CREATE PROCEDURE cancel_appointment(
     IN p_appointment_id INT,
     IN p_reason VARCHAR(255)
@@ -459,7 +525,13 @@ BEGIN
     SELECT appt_status
     INTO v_status
     FROM appointments
-    WHERE appoinment_id = p_appointment_id;
+    WHERE appoinment_id = p_appointment_id
+    FOR UPDATE;
+
+    IF v_status IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Appointment not found';
+    END IF;
 
     IF v_status NOT IN ('BOOKED', 'CONFIRMED') THEN
         SIGNAL SQLSTATE '45000'
@@ -467,53 +539,44 @@ BEGIN
     END IF;
 
     UPDATE appointments
-    SET appt_status = 'CANCELLED',
+    SET appt_status   = 'CANCELLED',
         cancel_reason = p_reason,
-        cancelled_at = NOW()
+        cancelled_at  = NOW()
     WHERE appoinment_id = p_appointment_id;
-
-    -- Apply simple refund policy
-
-    UPDATE bills
-    SET refund_ammount =
-            CASE
-                WHEN payment_status = 'PAID'
-                THEN net_ammount * 0.50
-                ELSE 0
-            END,
-
-        payment_status =
-            CASE
-                WHEN payment_status = 'PAID'
-                THEN 'REFUNDED'
-                ELSE 'VOID'
-            END
-
-    WHERE appointment_id = p_appointment_id;
 
     COMMIT;
 
-END //
+    SELECT
+        p_appointment_id AS appointment_id,
+        'Appointment cancelled' AS message;
+END$$
 
-
--- PART 9: RECORD PAYMENT PROCEDURE
-
+-- procedure 4
 CREATE PROCEDURE record_payment(
     IN p_bill_id INT,
     IN p_mode VARCHAR(20)
 )
 BEGIN
+    DECLARE v_mode VARCHAR(20);
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
         RESIGNAL;
     END;
 
+    SET v_mode = UPPER(TRIM(p_mode));
+
+    IF v_mode IS NULL OR v_mode = '' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Payment mode is required';
+    END IF;
+
     START TRANSACTION;
 
     UPDATE bills
     SET payment_status = 'PAID',
-        payment_mode = p_mode
+        payment_mode   = v_mode
     WHERE bill_id = p_bill_id
       AND payment_status = 'UNPAID';
 
@@ -524,16 +587,42 @@ BEGIN
 
     COMMIT;
 
-END //
+    SELECT
+        p_bill_id AS bill_id,
+        v_mode    AS payment_mode,
+        'Payment recorded' AS message;
+END$$
 
 DELIMITER ;
 
 
--- PART 10: CREATE VIEWS
 
--- View 1: Today's appointment schedule
+-- =====================================================
+-- TEST
+-- =====================================================
+-- CALL book_appointment('Rohan Das','DEMO_ID','DEMO1001','9000000001',
+--      'rohan@example.com','Cardiology','amit@hospital.com',
+--      '2026-12-01 10:00:00','FOLLOW_UP');
+-- CALL confirm_appointment(1);
+-- SELECT * FROM bills;                       -- 800 / -400 / 400 / UNPAID
+-- CALL record_payment(1,'UPI');
+-- CALL cancel_appointment(1,'Patient requested cancellation');
+-- SELECT * FROM bills;                       -- REFUNDED, refund_ammount 200
+--
+-- Error tests:
+-- CALL confirm_appointment(999);             -- Appointment not found
+-- CALL book_appointment('X','DEMO_ID','X1','9','x@x.com',
+--      'Cardiology','amit@hospital.com','2026-12-06 10:00:00','REGULAR');
+--                                            -- Doctor has a weekly off
+-- CALL book_appointment('X','DEMO_ID','X1','9','x@x.com',
+--      'Cardiology','amit@hospital.com','2026-12-02 10:00:00','REGULER');
+--                                            -- Invalid appointment type
 
-CREATE VIEW v_today_schedule AS
+
+USE hospital_db;
+
+-- View 1: today's appointment schedule
+CREATE OR REPLACE VIEW v_today_schedule AS
 SELECT
     a.appoinment_id,
     p.full_name AS patient_name,
@@ -543,36 +632,23 @@ SELECT
     a.appt_end,
     a.appt_status
 FROM appointments a
-JOIN patients p
-    ON a.patient_id = p.patient_id
-JOIN doctors d
-    ON a.doctor_id = d.doctor_id
-JOIN departments dep
-    ON d.dept_id = dep.dept_id
-WHERE DATE(a.appt_start) = CURDATE();
+JOIN patients p     ON a.patient_id = p.patient_id
+JOIN doctors d      ON a.doctor_id  = d.doctor_id
+JOIN departments dep ON d.dept_id   = dep.dept_id
+WHERE a.appt_start >= CURDATE()
+  AND a.appt_start <  CURDATE() + INTERVAL 1 DAY;
 
-
--- View 2: Doctor workload
-
-CREATE VIEW v_doctor_workload AS
+-- View 2: doctor workload
+CREATE OR REPLACE VIEW v_doctor_workload AS
 SELECT
     d.doctor_id,
     d.full_name AS doctor_name,
     dep.dept_name,
     COUNT(a.appoinment_id) AS total_appointments
 FROM doctors d
-JOIN departments dep
-    ON d.dept_id = dep.dept_id
-LEFT JOIN appointments a
-    ON d.doctor_id = a.doctor_id
-GROUP BY
-    d.doctor_id,
-    d.full_name,
-    dep.dept_name;
-
--- PART 11: INSERT SAMPLE PATIENTS
-
--- These are fictional demonstration IDs.
+JOIN departments dep ON d.dept_id = dep.dept_id
+LEFT JOIN appointments a ON d.doctor_id = a.doctor_id
+GROUP BY d.doctor_id, d.full_name, dep.dept_name;
 
 INSERT INTO patients
 (full_name, govt_id_type, govt_id_number,
@@ -591,157 +667,85 @@ VALUES
  '1995-02-20', 'Male', 'B+');
 
 
--- PART 12: TEST THE PROJECT
+-- Test
+-- 1. Doctor already booked at this time (Dr. Neha, appointment 3)
+CALL book_appointment('Rohan Das','DEMO_ID','DEMO1001','9000000001',
+     'rohan@example.com','Orthopedics','neha@hospital.com',
+     '2026-12-02 10:30:00','REGULAR');
+-- Doctor already has an appointment
 
--- 1. Book an appointment
+-- 2. Sunday is the doctor's weekly off
+CALL book_appointment('Rohan Das','DEMO_ID','DEMO1001','9000000001',
+     'rohan@example.com','Orthopedics','neha@hospital.com',
+     '2026-12-06 11:00:00','REGULAR');
+-- Doctor has a weekly off
 
-CALL book_appointment(
-    'Rohan Das',
-    'DEMO_ID',
-    'DEMO1001',
-    '9000000001',
-    'rohan@example.com',
-    'Cardiology',
-    'amit@hospital.com',
-    DATE_ADD(NOW(), INTERVAL 1 DAY),
-    'REGULAR'
-);
+-- 3. Before the doctor's shift starts (Dr. Neha starts at 10:00)
+CALL book_appointment('Rohan Das','DEMO_ID','DEMO1001','9000000001',
+     'rohan@example.com','Orthopedics','neha@hospital.com',
+     '2026-12-02 09:00:00','REGULAR');
+-- Outside doctor working hours
 
+-- 4. Not on a 30-minute slot
+CALL book_appointment('Rohan Das','DEMO_ID','DEMO1001','9000000001',
+     'rohan@example.com','Orthopedics','neha@hospital.com',
+     '2026-12-02 12:15:00','REGULAR');
+-- Invalid appointment time slot
 
--- 2. Display appointments
+-- 5. Wrong appointment type
+CALL book_appointment('Rohan Das','DEMO_ID','DEMO1001','9000000001',
+     'rohan@example.com','Orthopedics','neha@hospital.com',
+     '2026-12-02 12:00:00','REGULER');
+-- Invalid appointment type
 
-SELECT * FROM appointments;
+-- 6. Appointment does not exist
+CALL confirm_appointment(999);
+-- Appointment not found
 
+-- 7. Reverse a status by hand
+UPDATE appointments SET appt_status = 'BOOKED' WHERE appoinment_id = 1;
+-- Invalid appointment status change
 
--- 3. Confirm appointment
--- Use the actual appointment ID returned above.
+-- Deno
+USE hospital_db;
+
+-- CASE 1: Follow-up visit (fee 800, 50% off)
+CALL book_appointment('Rohan Das','DEMO_ID','DEMO1001','9000000001',
+     'rohan@example.com','Cardiology','amit@hospital.com',
+     '2026-12-01 10:00:00','FOLLOW_UP');
 
 CALL confirm_appointment(1);
+SELECT * FROM bills;                 -- 800 / -400 / 400 / UNPAID
 
-
--- 4. Display bills
-
-SELECT * FROM bills;
-
-
--- 5. Record payment
--- Use the actual bill ID.
-
-CALL record_payment(1, 'CASH');
-
-
--- 6. Complete appointment
+CALL record_payment(1, 'UPI');
 
 UPDATE appointments
 SET appt_status = 'COMPLETED'
-WHERE appoinment_id = 1
-AND appt_status = 'CONFIRMED';
+WHERE appoinment_id = 1;
 
 
--- 7. Cancel another appointment
--- Use an existing appointment ID.
+-- CASE 2: Pay, then cancel (fee 900, refund 450)
+CALL book_appointment('Priya Roy','DEMO_ID','DEMO1002','9000000002',
+     'priya@example.com','Neurology','rahul@hospital.com',
+     '2026-12-02 11:00:00','REGULAR');
 
-CALL cancel_appointment(
-    2,
-    'Patient requested cancellation'
-);
+CALL confirm_appointment(2);
+CALL record_payment(2, 'CARD');
+CALL cancel_appointment(2, 'Patient requested cancellation');
 
--- PART 13: IMPORTANT SELECT QUERIES
-
--- Display all patients
-
-SELECT * FROM patients;
+SELECT * FROM bills WHERE bill_id = 2;   -- REFUNDED, refund 450
 
 
--- Display all doctors
+-- CASE 3: Emergency (fee 600, +25%)
+CALL book_appointment('Amit Sen','DEMO_ID','DEMO1003','9000000003',
+     'amit@example.com','Orthopedics','neha@hospital.com',
+     '2026-12-02 10:30:00','EMERGENCY');
 
-SELECT * FROM doctors;
-
-
--- Display all departments
-
-SELECT * FROM departments;
-
-
--- Search patient
-
-SELECT *
-FROM patients
-WHERE govt_id_type = 'DEMO_ID'
-AND govt_id_number = 'DEMO1001';
+CALL confirm_appointment(3);
+SELECT * FROM bills WHERE bill_id = 3;   -- 600 / +150 / 750
 
 
--- Doctors with department names
-
-SELECT
-    d.full_name,
-    dep.dept_name,
-    d.consulatation_fee
-FROM doctors d
-JOIN departments dep
-    ON d.dept_id = dep.dept_id;
-
-
--- Appointments with patient and doctor names
-
-SELECT
-    p.full_name AS patient_name,
-    d.full_name AS doctor_name,
-    a.appt_start,
-    a.appt_status
-FROM appointments a
-JOIN patients p
-    ON a.patient_id = p.patient_id
-JOIN doctors d
-    ON a.doctor_id = d.doctor_id;
-
-
--- Count appointments for each doctor
-
-SELECT
-    doctor_id,
-    COUNT(*) AS total_appointments
-FROM appointments
-GROUP BY doctor_id;
-
-
--- Display unpaid bills
-
-SELECT *
-FROM bills
-WHERE payment_status = 'UNPAID';
-
-
--- Display today's schedule
-
-SELECT * FROM v_today_schedule;
-
-
--- Display doctor workload
-
-SELECT * FROM v_doctor_workload;
-
-
--- PART 14: UPDATE AND DELETE QUERIES
-
--- Update patient phone number
-
-UPDATE patients
-SET phone = '9111111111'
-WHERE patient_id = 1;
-
-
--- Update doctor's consultation fee
-
-UPDATE doctors
-SET consulatation_fee = 900
-WHERE doctor_id = 1;
-
-
--- Delete a patient without appointments
-
-DELETE FROM patients
-WHERE patient_id = 3;
-
-
-
+-- RESULT
+SELECT * FROM appointments;
+SELECT * FROM bills;
+select * from patients;
